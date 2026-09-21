@@ -1,0 +1,5 @@
+# Exact versions used for local verification, including Qt runtime/bindings.
+# Install with: python -m pip install -r requirements-lock.txt
+-r requirements.txt
+PyQt5-Qt5==5.15.2
+PyQt5-sip==12.19.0

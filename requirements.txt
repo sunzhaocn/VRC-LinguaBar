@@ -1,0 +1,4 @@
+# Direct dependencies tested with CPython 3.13.15 on Windows 11 x64.
+PyQt5==5.15.11
+python-osc==1.10.2
+pywin32==312
