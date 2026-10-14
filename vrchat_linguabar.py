@@ -11,7 +11,7 @@ Enter sends, Esc cancels. External focus loss cancels and closes the bar.
 Foreground changes and Qt deactivation events drive cleanup; no polling loop.
 
 Menu protection is conservative, not a complete Unity UI-state detector.
-Visible OS cursors/native menus block wakeup. Camera OSC updates on UDP 9001
+Native menus/text controls block wakeup. Camera OSC updates on UDP 9001
 also block wakeup when /usercamera/Mode != 0; mode 0 automatically unblocks it.
 Missing camera updates mean unknown; native UI checks are then the fallback.
 Controller/mouse/custom UI paths are not all observable. No game injection.
@@ -30,6 +30,7 @@ import argparse
 import ctypes
 import logging
 import ntpath
+import os
 import signal
 import socket
 import sys
@@ -42,6 +43,7 @@ if sys.platform != "win32":
 
 import win32api
 import win32gui
+import startup
 from pythonosc.osc_message_builder import OscMessageBuilder
 from pythonosc.osc_message import OscMessage, ParseError
 from PyQt5.QtCore import QCoreApplication, QEvent, QObject, Qt, QTimer, pyqtSignal, pyqtSlot
@@ -78,11 +80,6 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
                 ("flags", W.DWORD), ("time", W.DWORD), ("dwExtraInfo", ULONG_PTR)]
 
 
-class CURSORINFO(ctypes.Structure):
-    _fields_ = [("cbSize", W.DWORD), ("flags", W.DWORD),
-                ("hCursor", W.HANDLE), ("ptScreenPos", W.POINT)]
-
-
 class GUITHREADINFO(ctypes.Structure):
     _fields_ = [("cbSize", W.DWORD), ("flags", W.DWORD),
                 ("hwndActive", W.HWND), ("hwndFocus", W.HWND),
@@ -98,7 +95,6 @@ def bind(dll, name, result, *args):
 
 
 GetForegroundWindow = bind(user32, "GetForegroundWindow", W.HWND)
-GetCursorInfo = bind(user32, "GetCursorInfo", W.BOOL, ctypes.POINTER(CURSORINFO))
 GetGUIThreadInfo = bind(user32, "GetGUIThreadInfo", W.BOOL, W.DWORD, ctypes.POINTER(GUITHREADINFO))
 GetAsyncKeyState = bind(user32, "GetAsyncKeyState", W.SHORT, ctypes.c_int)
 IsIconic = bind(user32, "IsIconic", W.BOOL, W.HWND)
@@ -111,6 +107,7 @@ SetWinEventHook = bind(user32, "SetWinEventHook", W.HANDLE, W.DWORD, W.DWORD,
 UnhookWinEvent = bind(user32, "UnhookWinEvent", W.BOOL, W.HANDLE)
 SetForegroundWindow = bind(user32, "SetForegroundWindow", W.BOOL, W.HWND)
 SetFocus = bind(user32, "SetFocus", W.HWND, W.HWND)
+GetFocus = bind(user32, "GetFocus", W.HWND)
 AttachThreadInput = bind(user32, "AttachThreadInput", W.BOOL, W.DWORD, W.DWORD, W.BOOL)
 SetWindowsHookEx = bind(user32, "SetWindowsHookExW", W.HHOOK, ctypes.c_int, HOOKPROC, W.HINSTANCE, W.DWORD)
 UnhookWindowsHookEx = bind(user32, "UnhookWindowsHookEx", W.BOOL, W.HHOOK)
@@ -121,6 +118,7 @@ TranslateMessage = bind(user32, "TranslateMessage", W.BOOL, ctypes.POINTER(W.MSG
 DispatchMessage = bind(user32, "DispatchMessageW", LRESULT, ctypes.POINTER(W.MSG))
 PostThreadMessage = bind(user32, "PostThreadMessageW", W.BOOL, W.DWORD, W.UINT, W.WPARAM, W.LPARAM)
 GetCurrentThreadId = bind(kernel32, "GetCurrentThreadId", W.DWORD)
+CreateMutex = bind(kernel32, "CreateMutexW", W.HANDLE, W.LPVOID, W.BOOL, W.LPCWSTR)
 GetModuleHandle = bind(kernel32, "GetModuleHandleW", W.HMODULE, W.LPCWSTR)
 OpenProcess = bind(kernel32, "OpenProcess", W.HANDLE, W.DWORD, W.BOOL, W.DWORD)
 CloseHandle = bind(kernel32, "CloseHandle", W.BOOL, W.HANDLE)
@@ -133,6 +131,12 @@ ImmNotifyIME = bind(imm32, "ImmNotifyIME", W.BOOL, W.HANDLE, W.DWORD, W.DWORD, W
 
 def foreground() -> int:
     return int(GetForegroundWindow() or 0)
+
+
+def game_foreground() -> int:
+    """Normalize a focused Unity child window to its top-level game window."""
+    hwnd = foreground()
+    return int(GetAncestor(hwnd, 2) or hwnd) if hwnd else 0  # GA_ROOT
 
 
 def window_ids(hwnd: int) -> tuple[int, int]:
@@ -184,14 +188,15 @@ def cancel_imm(hwnd: int) -> None:
 def acquire_focus(bar: int, edit: int, source: int) -> bool:
     """One attempt; any successful attachment is detached in finally."""
     current = foreground()
-    if current not in (source, bar):
+    game = game_foreground()
+    if current != bar and game != source:
         return False  # The user switched away while the queued wakeup waited.
     if current != bar:
         SetForegroundWindow(bar)
     if foreground() == bar:
         SetFocus(edit)
-        return True
-    if foreground() != source:
+        return int(GetFocus() or 0) == edit
+    if game_foreground() != source:
         return False
     src_tid = int(GetCurrentThreadId())
     dst_tid, _ = window_ids(source)
@@ -200,12 +205,12 @@ def acquire_focus(bar: int, edit: int, source: int) -> bool:
         if dst_tid and dst_tid != src_tid:
             attached = bool(AttachThreadInput(src_tid, dst_tid, True))
         # Never change SPI_SETFOREGROUNDLOCKTIMEOUT or grant ASFW_ANY.
-        if foreground() != source:
+        if game_foreground() != source:
             return False
         SetForegroundWindow(bar)
         if foreground() == bar:
             SetFocus(edit)
-            return True
+            return int(GetFocus() or 0) == edit
         return False
     finally:
         if attached and not AttachThreadInput(src_tid, dst_tid, False):
@@ -275,20 +280,17 @@ def native_ui_reason(hwnd: int) -> str:
     """Wakeup-time heuristic only. Unity menus need not be native HWNDs."""
     if not hwnd or IsIconic(hwnd):
         return "Game window unavailable"
-    cursor = CURSORINFO()
-    cursor.cbSize = ctypes.sizeof(cursor)
-    if not GetCursorInfo(ctypes.byref(cursor)):
-        return "Cannot determine cursor state"
-    if cursor.flags & 1:  # CURSOR_SHOWING: normal Desktop gameplay hides it.
-        return "Visible interaction cursor / possible menu"
+    # Cursor visibility is not a reliable menu signal in desktop VRChat.
+    # Blocking Y here can leave the input bar permanently unreachable.
     tid, _ = window_ids(hwnd)
     info = GUITHREADINFO()
     info.cbSize = ctypes.sizeof(info)
     if not tid or not GetGUIThreadInfo(tid, ctypes.byref(info)):
-        return "Cannot determine native UI state"
+        return ""  # Unknown is not proof that the game is in a menu.
     if info.flags & (0x04 | 0x08 | 0x10) or info.hwndMenuOwner:
         return "Native menu active"
-    if info.hwndCaret or (info.hwndFocus and int(info.hwndFocus) != hwnd):
+    focus_class = class_name(int(info.hwndFocus or 0)).casefold()
+    if info.hwndCaret or focus_class == "edit" or focus_class.startswith("richedit") or "windowsforms10.edit" in focus_class:
         return "Native text/child control active"
     return ""
 
@@ -427,7 +429,7 @@ class YHook:
                             self.swallow_y = False
                         return 1
                     if not is_up and not self.stopping.is_set() and key.vkCode == VK_Y:
-                        hwnd = foreground()
+                        hwnd = game_foreground()
                         pid = self.targets.get(hwnd)
                         if pid and window_ids(hwnd)[1] == pid and class_name(hwnd) == VRCHAT_CLASS:
                             ctrl = bool(GetAsyncKeyState(0x11) & 0x8000)
@@ -542,6 +544,7 @@ class ImeLineEdit(QLineEdit):
 
 
 class InputBar(QWidget):
+    finished = pyqtSignal()
     # Only relevant to a foreground-change EVENT, never polled. A browser is
     # never exempted just because an IME preedit string happens to exist.
     IME_CLASSES = frozenset({"Microsoft.IME.UIManager.CandidateWindow.Host",
@@ -558,7 +561,7 @@ class InputBar(QWidget):
         self._last_text = ""
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        # This window must activate so the native IME can own a real editor.
         # One explicit deleteLater path; no WA_DeleteOnClose / manual child deletion.
         self.setObjectName("Bar")
         self.setStyleSheet("""
@@ -733,9 +736,11 @@ class InputBar(QWidget):
                 finally:
                     self.hide()
                     self.deleteLater()
+        self.finished.emit()
         if can_restore and IsWindow(self.target):
             SetForegroundWindow(self.target)
-        LOG.debug("Bar finished: %s", reason)
+        (LOG.warning if reason == "focus-acquisition-failed" else LOG.debug)(
+            "Bar finished: %s", reason)
 
     def closeEvent(self, event):
         self.finish(False, "window-close")
@@ -772,10 +777,36 @@ class Controller(QObject):
             self.tray = QSystemTrayIcon(app.style().standardIcon(QStyle.SP_MessageBoxInformation), self)
             self.tray.setToolTip("VRC LinguaBar · Y 直接聊天 · 失焦自动关闭")
             self.menu = QMenu()
+            self.startup_menu = self.menu.addMenu("自动启动")
+            self.startup_actions = {}
+            for mode, label in (("off", "关闭"), ("game", "随 VRChat 启动"),
+                                ("login", "登录 Windows 时启动")):
+                action = self.startup_menu.addAction(label)
+                action.setCheckable(True)
+                action.triggered.connect(lambda _checked=False, selected=mode: self.set_startup_mode(selected))
+                self.startup_actions[mode] = action
+            self.update_startup_actions()
+            self.menu.addSeparator()
             self.menu.addAction("退出", app.quit)
             self.tray.setContextMenu(self.menu)
             self.tray.show()
         app.aboutToQuit.connect(self.shutdown)
+
+    def update_startup_actions(self):
+        try:
+            mode = startup.current_mode(os.path.abspath(__file__), sys.executable)
+        except OSError as exc:
+            LOG.warning("Cannot read automatic startup setting: %s", exc)
+            mode = "off"
+        for key, action in self.startup_actions.items():
+            action.setChecked(key == mode)
+
+    def set_startup_mode(self, mode):
+        try:
+            startup.configure(mode, os.path.abspath(__file__), sys.executable)
+        except OSError as exc:
+            LOG.error("Cannot update automatic startup: %s", exc)
+        self.update_startup_actions()
 
     def start(self):
         self.refresh_targets()
@@ -813,6 +844,10 @@ class Controller(QObject):
 
     @pyqtSlot(object)
     def on_foreground_changed(self, hwnd):
+        # Discover a game that appeared after this program started without
+        # waiting for the next periodic scan or a missed first Y press.
+        if not self.stopping and hwnd and class_name(game_foreground()) == VRCHAT_CLASS:
+            self.refresh_targets()
         if not self.stopping and self.bar is not None:
             # Re-read the CURRENT foreground when the queued check executes;
             # an old notification must not close a newly activated bar.
@@ -825,7 +860,7 @@ class Controller(QObject):
                 return
             hwnd, pid, ticket = target
             self.camera.drain()
-            if (foreground() != hwnd or window_ids(hwnd)[1] != pid
+            if (game_foreground() != hwnd or window_ids(hwnd)[1] != pid
                     or class_name(hwnd) != VRCHAT_CLASS
                     or process_name(pid) != "vrchat.exe"
                     or self.hook.targets.get(hwnd) != pid
@@ -837,7 +872,7 @@ class Controller(QObject):
                     self.bar.refocus()
                 return
             self.bar = InputBar(self.osc, hwnd, self.args.idle_ms)
-            self.bar.destroyed.connect(self.bar_destroyed)
+            self.bar.finished.connect(self.bar_finished)
             self.bar.open_bar()
         except Exception:
             LOG.exception("Cannot open input bar")
@@ -846,8 +881,9 @@ class Controller(QObject):
         finally:
             self.hook.pending.clear()
 
-    def bar_destroyed(self, _=None):
-        # Keep the wrapper until actual QObject destruction, not just hide().
+    def bar_finished(self):
+        # The old QWidget is already hidden and scheduled for deletion.
+        # Release it now so a new Y can open a fresh bar immediately.
         self.bar = None
 
     @pyqtSlot()
@@ -905,6 +941,8 @@ def parse_args(argv=None):
                         help="Local VRChat OSC output/forwarding port; 0 disables observation")
     parser.add_argument("--vrchat-pid", type=int, default=0,
                         help="Restrict capture to this VRChat PID; 0 accepts verified VRChat processes")
+    parser.add_argument("--startup-mode", choices=("off", "game", "login"),
+                        help="Set per-user automatic startup and exit")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
     if not 1 <= args.osc_port <= 65535:
@@ -920,13 +958,28 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    startup.configure_logging(args.verbose)
+    if args.startup_mode:
+        try:
+            startup.configure(args.startup_mode, os.path.abspath(__file__), sys.executable)
+            LOG.info("Automatic startup set to %s", args.startup_mode)
+            return 0
+        except OSError:
+            LOG.exception("Cannot update automatic startup")
+            return 1
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication([sys.argv[0]])
     app.setApplicationName("VRC LinguaBar")
     app.setQuitOnLastWindowClosed(False)
+    mutex = CreateMutex(None, False, "Local\\VRCLinguaBarApp")
+    if not mutex:
+        LOG.error("Cannot create single-instance mutex: %s", ctypes.get_last_error())
+        return 1
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        CloseHandle(mutex)
+        LOG.info("VRC LinguaBar is already running")
+        return 0
     controller = None
     old_sigint = signal.signal(signal.SIGINT, lambda *_: app.quit())
     try:
@@ -941,6 +994,7 @@ def main(argv=None) -> int:
         if controller is not None:
             controller.shutdown()
         signal.signal(signal.SIGINT, old_sigint)
+        CloseHandle(mutex)
 
 
 if __name__ == "__main__":
