@@ -1,20 +1,20 @@
-"""Build the Windows x64 portable ZIP from a clean source checkout."""
+"""Build the Windows x64 single executable from a clean source checkout."""
 from __future__ import annotations
 
 import hashlib
 import importlib.metadata as metadata
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
 import struct
 import subprocess
 import sys
-import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.0.2"
+VERSION = "0.0.3"
 PROGRAM = "VRC语伴"
 
 
@@ -47,18 +47,9 @@ def main() -> None:
         if not directory.resolve().is_relative_to(ROOT):
             raise SystemExit("Build output must stay inside the source checkout.")
     commit = git("rev-parse", "HEAD")
-    subprocess.run([
-        sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
-        "--onedir", "--windowed", "--name", PROGRAM,
-        "--distpath", str(ROOT / "dist"), "--workpath", str(ROOT / "build" / "pyinstaller"),
-        "--specpath", str(ROOT / "build"),
-        "--version-file", str(ROOT / "packaging" / "windows-version.txt"),
-        str(ROOT / "vrchat_linguabar.py"),
-    ], cwd=ROOT, check=True)
-
-    bundle = ROOT / "dist" / PROGRAM
+    bundle = ROOT / "build" / "release-resources"
     licenses = bundle / "licenses"
-    licenses.mkdir(exist_ok=True)
+    licenses.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / "LICENSE", bundle / "LICENSE.txt")
     shutil.copyfile(ROOT / "packaging" / "使用说明.txt", bundle / "使用说明.txt")
     shutil.copytree(ROOT / "docs", bundle / "docs", dirs_exist_ok=True)
@@ -84,24 +75,31 @@ def main() -> None:
     manifest = {
         "application": "VRC 语伴", "version": VERSION, "source_commit": commit,
         "platform": "Windows x64", "python": platform.python_version(),
-        "entrypoint": f"{PROGRAM}.exe", "layout": "onedir",
+        "entrypoint": f"{PROGRAM}.exe", "layout": "onefile",
         "packages": {name: metadata.version(name) for name in (
             "PyQt5", "PyQt5-Qt5", "PyQt5-sip", "python-osc", "pywin32",
             "PyInstaller", "pyinstaller-hooks-contrib")},
-        "executable_sha256": sha256(bundle / f"{PROGRAM}.exe"),
     }
     (bundle / "build-info.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    archive = ROOT / "dist" / f"VRC-Yuban-{VERSION}-Windows-x64.zip"
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as output:
-        for path in sorted(bundle.rglob("*")):
-            if path.is_file():
-                output.write(path, path.relative_to(bundle.parent))
-    checksum = sha256(archive)
-    (ROOT / "dist" / "SHA256SUMS.txt").write_text(
-        f"{checksum}  {archive.name}\n", encoding="ascii")
-    print(json.dumps({"archive": str(archive), "bytes": archive.stat().st_size,
+    subprocess.run([
+        sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
+        "--onefile", "--windowed", "--name", PROGRAM,
+        "--distpath", str(ROOT / "dist"), "--workpath", str(ROOT / "build" / "pyinstaller"),
+        "--specpath", str(ROOT / "build"),
+        "--add-data", str(bundle) + os.pathsep + ".",
+        "--version-file", str(ROOT / "packaging" / "windows-version.txt"),
+        str(ROOT / "vrchat_linguabar.py"),
+    ], cwd=ROOT, check=True)
+    executable = ROOT / "dist" / f"{PROGRAM}.exe"
+    checksum = sha256(executable)
+    manifest["executable_sha256"] = checksum
+    (ROOT / "dist" / f"build-info-{VERSION}.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (ROOT / "dist" / f"SHA256SUMS-{VERSION}.txt").write_text(
+        f"{checksum}  {executable.name}\n", encoding="utf-8")
+    print(json.dumps({"executable": str(executable), "bytes": executable.stat().st_size,
                       "sha256": checksum, "source_commit": commit}, ensure_ascii=False))
 
 

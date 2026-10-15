@@ -21,13 +21,13 @@ VRC 语伴是一个 Windows 桌面小工具。它会在游戏前方打开输入�
 
 需要 Windows 10 / 11 64 位、VRChat PC 客户端，以及你平时使用的 Windows 输入法。**免安装版已带齐运行环境，不需要安装 Python。**
 
-1. 到 [Releases 下载](https://github.com/sunzhaocn/VRC-LinguaBar/releases/latest) `VRC-Yuban-0.0.2-Windows-x64.zip`，解压到一个固定位置。
-2. 在 VRChat 的 Action Menu 中打开 **OSC → Enabled**，然后双击解压文件夹里的 **VRC语伴.exe**。
+1. 到 [Releases 下载](https://github.com/sunzhaocn/VRC-LinguaBar/releases/latest) **VRC语伴.exe**，保存到一个固定位置。
+2. 在 VRChat 的 Action Menu 中打开 **OSC → Enabled**，然后双击 **VRC语伴.exe**。
 3. 回到游戏，关闭菜单和相机，按 **Y** 开始输入，按 **Enter** 发送并收起。
 
-请保留完整文件夹，`VRC语伴.exe` 和 `_internal` 必须放在一起。想放到桌面时，可以给 exe 创建快捷方式。程序启动后会留在系统托盘，同一用户会话只运行一份。
+下载一个 EXE 就能运行，所需环境已包含在程序中。可以直接放在桌面或其他固定位置，双击后会留在系统托盘，同一用户会话只运行一份。
 
-更新前，使用“随 VRChat 启动”的用户先把自动启动设为“关闭”，等待约 3 秒，再从托盘退出程序。解压并启动新版后，可以重新开启自动启动。若换了存放位置，请重新设置。
+更新前，使用“随 VRChat 启动”的用户先把自动启动设为“关闭”，等待约 3 秒，再从托盘退出程序。下载并启动新版后，可以重新开启自动启动。若换了存放位置，请重新设置。
 
 ## 日常操作
 
@@ -41,7 +41,7 @@ VRC 语伴是一个 Windows 桌面小工具。它会在游戏前方打开输入�
 | 点击其他位置或 Alt+Tab | 取消本次输入并关闭 |
 | 托盘菜单 → 退出 | 退出后台程序 |
 
-右键托盘图标，在 **自动启动** 中选择“关闭”“随 VRChat 启动”或“登录 Windows 时启动”。设置只作用于当前 Windows 用户。移动程序文件夹后，需要重新设置。
+右键托盘图标，在 **自动启动** 中选择“关闭”“随 VRChat 启动”或“登录 Windows 时启动”。设置只作用于当前 Windows 用户。移动 exe 后，需要重新设置。
 
 ## 使用范围
 
@@ -70,7 +70,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe tools/build_release.py
 ```
 
-生成的 ZIP 和 SHA-256 校验文件位于 `dist` 目录。
+生成的单文件 EXE 和 SHA-256 校验文件位于 `dist` 目录。
 
 ## 更多说明
 
