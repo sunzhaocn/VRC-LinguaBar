@@ -57,6 +57,7 @@ LOG = logging.getLogger("vrchat-ime")
 MAX_CHARS = 144
 IDLE_MS = 2500
 VRCHAT_CLASS = "UnityWndClass"
+APP_MUTEX = "Local\\VRCLinguaBarApp"
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
 WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
@@ -96,6 +97,7 @@ def bind(dll, name, result, *args):
 
 GetForegroundWindow = bind(user32, "GetForegroundWindow", W.HWND)
 GetGUIThreadInfo = bind(user32, "GetGUIThreadInfo", W.BOOL, W.DWORD, ctypes.POINTER(GUITHREADINFO))
+GetClipCursor = bind(user32, "GetClipCursor", W.BOOL, ctypes.POINTER(W.RECT))
 GetAsyncKeyState = bind(user32, "GetAsyncKeyState", W.SHORT, ctypes.c_int)
 IsIconic = bind(user32, "IsIconic", W.BOOL, W.HWND)
 GetClassName = bind(user32, "GetClassNameW", ctypes.c_int, W.HWND, W.LPWSTR, ctypes.c_int)
@@ -186,17 +188,28 @@ def cancel_imm(hwnd: int) -> None:
 
 
 def acquire_focus(bar: int, edit: int, source: int) -> bool:
-    """One attempt; any successful attachment is detached in finally."""
+    """Bounded activation; any successful input-thread attachment is detached."""
+    def focus_edit() -> bool:
+        SetFocus(edit)
+        focused = int(GetFocus() or 0)
+        if focused != edit:
+            LOG.warning("Input window active but editor not focused: bar=%s focus=%s edit=%s",
+                        bar, focused, edit)
+        return focused == edit
+
     current = foreground()
     game = game_foreground()
     if current != bar and game != source:
+        LOG.warning("Focus request expired: current=%s game=%s source=%s", current, game, source)
         return False  # The user switched away while the queued wakeup waited.
     if current != bar:
         SetForegroundWindow(bar)
     if foreground() == bar:
-        SetFocus(edit)
-        return int(GetFocus() or 0) == edit
+        return focus_edit()
     if game_foreground() != source:
+        if foreground() == bar:  # The activation completed between reads.
+            return focus_edit()
+        LOG.warning("Focus request lost game foreground before attach")
         return False
     src_tid = int(GetCurrentThreadId())
     dst_tid, _ = window_ids(source)
@@ -205,12 +218,18 @@ def acquire_focus(bar: int, edit: int, source: int) -> bool:
         if dst_tid and dst_tid != src_tid:
             attached = bool(AttachThreadInput(src_tid, dst_tid, True))
         # Never change SPI_SETFOREGROUNDLOCKTIMEOUT or grant ASFW_ANY.
+        if foreground() == bar:
+            return focus_edit()  # The first activation finished during attach.
         if game_foreground() != source:
+            if foreground() == bar:
+                return focus_edit()
+            LOG.warning("Focus request lost game foreground during attach")
             return False
         SetForegroundWindow(bar)
         if foreground() == bar:
-            SetFocus(edit)
-            return int(GetFocus() or 0) == edit
+            return focus_edit()
+        LOG.warning("Input window could not activate: bar=%s game=%s attached=%s error=%s",
+                    bar, game_foreground(), attached, ctypes.get_last_error())
         return False
     finally:
         if attached and not AttachThreadInput(src_tid, dst_tid, False):
@@ -295,6 +314,19 @@ def native_ui_reason(hwnd: int) -> str:
     return ""
 
 
+def released_game_cursor_reason() -> str:
+    """Desktop VRChat unlocks the cursor for its Unity-drawn menus.
+
+    Check confinement rather than cursor visibility: the latter can be the
+    same in gameplay and menus. An unavailable reading is not proof of a menu.
+    """
+    rect = W.RECT()
+    if GetClipCursor(ctypes.byref(rect)) and (rect.right - rect.left > 2
+                                              or rect.bottom - rect.top > 2):
+        return "Game cursor released / possible menu"
+    return ""
+
+
 class MenuGuard:
     """No remembered menu toggle: evaluate the current UI on every wakeup.
 
@@ -323,9 +355,12 @@ class MenuGuard:
         self.camera_update(None)
 
     def check(self, hwnd: int, pid: int) -> str:
+        native = native_ui_reason(hwnd)
+        if native:
+            return native
         if self.camera_mode not in (None, 0):
             return f"Camera active (mode {self.camera_mode})"
-        return native_ui_reason(hwnd)
+        return released_game_cursor_reason()
 
 
 class ForegroundMonitor(QObject):
@@ -434,14 +469,17 @@ class YHook:
                         if pid and window_ids(hwnd)[1] == pid and class_name(hwnd) == VRCHAT_CLASS:
                             ctrl = bool(GetAsyncKeyState(0x11) & 0x8000)
                             alt = bool(GetAsyncKeyState(0x12) & 0x8000)
-                            shift = bool(GetAsyncKeyState(0x10) & 0x8000)
                             win = bool((GetAsyncKeyState(0x5B) | GetAsyncKeyState(0x5C)) & 0x8000)
-                            if not (ctrl or alt or shift or win):
+                            # Shift is VRChat's sprint key. Shift+Y is still a
+                            # chat request, even while movement keys are held.
+                            if not (ctrl or alt or win):
                                 reason = self.guard.check(hwnd, pid)
                                 self.guard.reason = reason or "Automatic Y capture enabled"
-                                if not reason:
+                                # Keep Y out of VRChat while a menu/camera is
+                                # active, but preserve typing in a native edit.
+                                if reason != "Native text/child control active":
                                     self.swallow_y = True
-                                    if not self.pending.is_set():
+                                    if not reason and not self.pending.is_set():
                                         self.pending.set()
                                         self.bridge.wake.emit((hwnd, pid, self.guard.ticket()))
                                     return 1
@@ -967,22 +1005,24 @@ def main(argv=None) -> int:
         except OSError:
             LOG.exception("Cannot update automatic startup")
             return 1
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-    app = QApplication([sys.argv[0]])
-    app.setApplicationName("VRC LinguaBar")
-    app.setQuitOnLastWindowClosed(False)
-    mutex = CreateMutex(None, False, "Local\\VRCLinguaBarApp")
+    # Take the lock before creating any Qt windows, tray icons or keyboard hooks.
+    mutex = CreateMutex(None, False, APP_MUTEX)
     if not mutex:
         LOG.error("Cannot create single-instance mutex: %s", ctypes.get_last_error())
         return 1
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
         CloseHandle(mutex)
-        LOG.info("VRC LinguaBar is already running")
+        LOG.info("VRC LinguaBar is already running; duplicate launch ignored")
         return 0
     controller = None
-    old_sigint = signal.signal(signal.SIGINT, lambda *_: app.quit())
+    old_sigint = None
     try:
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        app = QApplication([sys.argv[0]])
+        app.setApplicationName("VRC LinguaBar")
+        app.setQuitOnLastWindowClosed(False)
+        old_sigint = signal.signal(signal.SIGINT, lambda *_: app.quit())
         controller = Controller(app, args)
         controller.start()
         LOG.info("Ready: Y chats directly; Enter sends; Esc/focus loss closes; Ctrl+C/tray exits")
@@ -993,7 +1033,8 @@ def main(argv=None) -> int:
     finally:
         if controller is not None:
             controller.shutdown()
-        signal.signal(signal.SIGINT, old_sigint)
+        if old_sigint is not None:
+            signal.signal(signal.SIGINT, old_sigint)
         CloseHandle(mutex)
 
 

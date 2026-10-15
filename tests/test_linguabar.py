@@ -16,6 +16,27 @@ import vrchat_linguabar as vrc
 
 
 class GuardTests(unittest.TestCase):
+    def test_released_cursor_distinguishes_live_menu_from_gameplay_lock(self):
+        def clip(left, top, right, bottom):
+            def fill(pointer):
+                rect = ctypes.cast(pointer, ctypes.POINTER(vrc.W.RECT)).contents
+                rect.left, rect.top, rect.right, rect.bottom = left, top, right, bottom
+                return True
+            return fill
+
+        with patch.object(vrc, "GetClipCursor", side_effect=clip(960, 540, 960, 540)):
+            self.assertEqual(vrc.released_game_cursor_reason(), "")
+        with patch.object(vrc, "GetClipCursor", side_effect=clip(0, 0, 1920, 1080)):
+            self.assertEqual(vrc.released_game_cursor_reason(), "Game cursor released / possible menu")
+        with patch.object(vrc, "GetClipCursor", return_value=False):
+            self.assertEqual(vrc.released_game_cursor_reason(), "")
+
+    def test_native_text_control_takes_precedence_over_released_cursor(self):
+        guard = vrc.MenuGuard()
+        with patch.object(vrc, "native_ui_reason", return_value="Native text/child control active"), \
+             patch.object(vrc, "released_game_cursor_reason", return_value="Game cursor released / possible menu"):
+            self.assertEqual(guard.check(11, 22), "Native text/child control active")
+
     def test_visible_cursor_and_non_text_child_do_not_block_y(self):
         def gui_info(_tid, pointer):
             info = ctypes.cast(pointer, ctypes.POINTER(vrc.GUITHREADINFO)).contents
@@ -47,7 +68,7 @@ class GuardTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
-    def test_y_is_captured_once_for_existing_game(self):
+    def make_hook(self):
         events = []
         bridge = SimpleNamespace(wake=SimpleNamespace(emit=events.append))
         guard = vrc.MenuGuard()
@@ -55,17 +76,67 @@ class HookTests(unittest.TestCase):
         hook.targets = {11: 22}
         key = vrc.KBDLLHOOKSTRUCT()
         key.vkCode = vrc.VK_Y
+        return hook, guard, key, events
+
+    def test_y_is_captured_once_for_existing_game(self):
+        hook, guard, key, events = self.make_hook()
         with patch.object(vrc, "game_foreground", return_value=11), \
              patch.object(vrc, "window_ids", return_value=(1, 22)), \
              patch.object(vrc, "class_name", return_value=vrc.VRCHAT_CLASS), \
              patch.object(vrc, "GetAsyncKeyState", return_value=0), \
-             patch.object(vrc, "native_ui_reason", return_value=""):
+             patch.object(vrc, "native_ui_reason", return_value=""), \
+             patch.object(vrc, "released_game_cursor_reason", return_value=""):
             pointer = ctypes.addressof(key)
             self.assertEqual(hook._callback(0, vrc.WM_KEYDOWN, pointer), 1)
             self.assertEqual(hook._callback(0, vrc.WM_KEYDOWN, pointer), 1)
             self.assertEqual(hook._callback(0, vrc.WM_KEYUP, pointer), 1)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0][:2], (11, 22))
+
+    def test_shift_y_while_moving_opens_bar_without_reaching_game(self):
+        hook, guard, key, events = self.make_hook()
+        held = {0x10, ord("W"), ord("A"), ord("S"), ord("D")}
+        with patch.object(vrc, "game_foreground", return_value=11), \
+             patch.object(vrc, "window_ids", return_value=(1, 22)), \
+             patch.object(vrc, "class_name", return_value=vrc.VRCHAT_CLASS), \
+             patch.object(vrc, "GetAsyncKeyState", side_effect=lambda vk: 0x8000 if vk in held else 0), \
+             patch.object(vrc, "native_ui_reason", return_value=""), \
+             patch.object(vrc, "released_game_cursor_reason", return_value=""), \
+             patch.object(vrc, "CallNextHookEx") as next_hook:
+            pointer = ctypes.addressof(key)
+            self.assertEqual(hook._callback(0, vrc.WM_KEYDOWN, pointer), 1)
+            self.assertEqual(hook._callback(0, vrc.WM_KEYUP, pointer), 1)
+        next_hook.assert_not_called()
+        self.assertEqual(len(events), 1)
+
+    def test_y_in_menu_is_ignored_by_bar_and_game(self):
+        hook, guard, key, events = self.make_hook()
+        with patch.object(vrc, "game_foreground", return_value=11), \
+             patch.object(vrc, "window_ids", return_value=(1, 22)), \
+             patch.object(vrc, "class_name", return_value=vrc.VRCHAT_CLASS), \
+             patch.object(vrc, "GetAsyncKeyState", return_value=0), \
+             patch.object(vrc, "native_ui_reason", return_value=""), \
+             patch.object(vrc, "released_game_cursor_reason", return_value="Game cursor released / possible menu"), \
+             patch.object(vrc, "CallNextHookEx") as next_hook:
+            pointer = ctypes.addressof(key)
+            self.assertEqual(hook._callback(0, vrc.WM_KEYDOWN, pointer), 1)
+            self.assertEqual(hook._callback(0, vrc.WM_KEYDOWN, pointer), 1)
+            self.assertEqual(hook._callback(0, vrc.WM_KEYUP, pointer), 1)
+        next_hook.assert_not_called()
+        self.assertEqual(events, [])
+
+    def test_y_in_native_text_control_remains_typable(self):
+        hook, guard, key, events = self.make_hook()
+        with patch.object(vrc, "game_foreground", return_value=11), \
+             patch.object(vrc, "window_ids", return_value=(1, 22)), \
+             patch.object(vrc, "class_name", return_value=vrc.VRCHAT_CLASS), \
+             patch.object(vrc, "GetAsyncKeyState", return_value=0), \
+             patch.object(vrc, "native_ui_reason", return_value="Native text/child control active"), \
+             patch.object(vrc, "released_game_cursor_reason", return_value="Game cursor released / possible menu"), \
+             patch.object(vrc, "CallNextHookEx", return_value=0) as next_hook:
+            self.assertEqual(hook._callback(0, vrc.WM_KEYDOWN, ctypes.addressof(key)), 0)
+        next_hook.assert_called_once()
+        self.assertEqual(events, [])
 
     def test_focus_must_reach_edit(self):
         state = {"foreground": 11, "focus": 0}
@@ -85,6 +156,25 @@ class HookTests(unittest.TestCase):
             state.update(foreground=11, focus=0)
             with patch.object(vrc, "GetFocus", return_value=0):
                 self.assertFalse(vrc.acquire_focus(33, 44, 11))
+
+    def test_focus_activation_finishing_during_thread_attach_is_success(self):
+        state = {"foreground": 11, "focus": 0}
+        def attach(_src, _dst, enabled):
+            if enabled:
+                state["foreground"] = 33
+            return True
+
+        with patch.object(vrc, "foreground", side_effect=lambda: state["foreground"]), \
+             patch.object(vrc, "game_foreground", side_effect=lambda: state["foreground"]), \
+             patch.object(vrc, "SetForegroundWindow", return_value=False), \
+             patch.object(vrc, "SetFocus", side_effect=lambda hwnd: state.update(focus=hwnd)), \
+             patch.object(vrc, "GetFocus", side_effect=lambda: state["focus"]), \
+             patch.object(vrc, "window_ids", return_value=(2, 22)), \
+             patch.object(vrc, "GetCurrentThreadId", return_value=1), \
+             patch.object(vrc, "AttachThreadInput", side_effect=attach) as attached:
+            self.assertTrue(vrc.acquire_focus(33, 44, 11))
+        self.assertEqual(state["focus"], 44)
+        self.assertEqual(attached.call_count, 2)  # Attach and detach.
 
 
 class ControllerTests(unittest.TestCase):
