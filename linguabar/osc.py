@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import logging
 import socket
+import time
 from typing import TYPE_CHECKING
 
-from pythonosc.osc_message import OscMessage, ParseError
-from pythonosc.osc_message_builder import OscMessageBuilder
+from pythonosc.osc_message import ParseError
+from pythonosc.osc_message_builder import BuildError, OscMessageBuilder
 from PyQt5.QtCore import QObject, QTimer
 from PyQt5.QtNetwork import QHostAddress, QUdpSocket
 
@@ -16,6 +17,52 @@ if TYPE_CHECKING:
     from .guards import MenuGuard
 
 LOG = logging.getLogger("vrchat-ime")
+
+
+def _camera_modes(data: bytes) -> list[int]:
+    """Read present camera observations, with bounded bundle traversal.
+
+    This listener only consumes the camera's one-int32 message. Matching its
+    complete wire shape also rejects unsupported type tags that python-osc
+    otherwise skips. Future bundles are not current observations, so discard
+    them rather than blocking the GUI or retaining state across game sessions.
+    """
+    camera_header = b"/usercamera/Mode\0\0\0\0,i\0\0"
+    pending = [(data, 0)]
+    modes = []
+    elements = 0
+    now_ntp = time.time() + 2208988800
+    while pending:
+        packet, depth = pending.pop()
+        elements += 1
+        if elements > 128 or depth > 16 or len(packet) % 4:
+            return []
+        if packet.startswith(b"#bundle\0"):
+            if len(packet) < 16:
+                return []
+            timestamp = int.from_bytes(packet[8:16], "big")
+            if timestamp != 1 and timestamp / (1 << 32) > now_ntp:
+                continue
+            children = []
+            index = 16
+            while index < len(packet):
+                if index + 4 > len(packet):
+                    return []
+                size = int.from_bytes(packet[index:index + 4], "big", signed=True)
+                index += 4
+                if size <= 0 or size % 4 or index + size > len(packet):
+                    return []
+                children.append((packet[index:index + size], depth + 1))
+                if elements + len(pending) + len(children) > 128:
+                    return []
+                index += size
+            pending.extend(reversed(children))
+        elif (len(packet) == len(camera_header) + 4
+              and packet.startswith(camera_header)):
+            mode = int.from_bytes(packet[-4:], "big", signed=True)
+            if 0 <= mode <= 6:
+                modes.append(mode)
+    return modes
 
 
 class OscSender:
@@ -38,7 +85,7 @@ class OscSender:
                 builder.add_arg(value)
             self.socket.sendto(builder.build().dgram, self.target)
             return True
-        except (OSError, ValueError, UnicodeError) as exc:
+        except (OSError, ValueError, UnicodeError, BuildError, ParseError) as exc:
             # No synchronous console I/O in the per-keystroke path.
             self.failures += 1
             self.last_error = str(exc)
@@ -86,14 +133,8 @@ class CameraMonitor(QObject):
             data, source, _ = self.socket.readDatagram(65536)
             if not source.isLoopback():
                 continue
-            try:
-                message = OscMessage(bytes(data))
-                values = message.params
-                if (message.address == "/usercamera/Mode" and len(values) == 1
-                        and type(values[0]) is int and 0 <= values[0] <= 6):
-                    self.guard.camera_update(values[0])
-            except (ParseError, ValueError, TypeError, UnicodeError):
-                pass
+            for mode in _camera_modes(bytes(data)):
+                self.guard.camera_update(mode)
         if self.socket.hasPendingDatagrams():
             QTimer.singleShot(0, self.drain)
 

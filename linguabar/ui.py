@@ -28,6 +28,7 @@ class ImeLineEdit(QLineEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.preedit = ""
+        self.handling_ime_event = False
         self.native_hwnd = 0
         self.last_commit = float("-inf")
         self.setMaxLength(MAX_CHARS)
@@ -39,9 +40,15 @@ class ImeLineEdit(QLineEdit):
         self.preedit = event.preeditString()
         if event.commitString():
             self.last_commit = time.monotonic()
-        # Set preedit state BEFORE super emits textChanged.
-        super().inputMethodEvent(event)
-        self.ime_activity.emit()
+        # Qt emits textChanged synchronously while committing a candidate.
+        # Its external IME window may still own foreground during this call.
+        previous = self.handling_ime_event
+        self.handling_ime_event = True
+        try:
+            super().inputMethodEvent(event)
+            self.ime_activity.emit()
+        finally:
+            self.handling_ime_event = previous
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -175,7 +182,8 @@ class InputBar(QWidget):
         if (hwnd in (self.bar_hwnd, self.edit.native_hwnd)
                 or (self.bar_hwnd and int(GetAncestor(hwnd, 3) or 0) == self.bar_hwnd)):  # GA_ROOTOWNER
             return True
-        if self.edit.composing() and class_name(hwnd) in self.IME_CLASSES:
+        if ((self.edit.composing() or self.edit.handling_ime_event)
+                and class_name(hwnd) in self.IME_CLASSES):
             return process_name(window_ids(hwnd)[1]) in {"ctfmon.exe", "textinputhost.exe"}
         return False
 
@@ -262,7 +270,11 @@ class InputBar(QWidget):
             self.hide()
             self.deleteLater()
             self.finished.emit()
-        if can_restore and IsWindow(self.target):
+        # IME cleanup and hiding can dispatch native focus changes. Do not
+        # override a switch to another application or focus a reused HWND.
+        if (can_restore and foreground() in (self.bar_hwnd, self.target)
+                and IsWindow(self.target)
+                and window_ids(self.target)[1] == self.target_pid):
             SetForegroundWindow(self.target)
         (LOG.warning if reason == "focus-acquisition-failed" else LOG.debug)(
             "Bar finished: %s", reason)

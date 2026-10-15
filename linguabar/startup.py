@@ -12,7 +12,7 @@ import time
 import winreg
 from ctypes import wintypes as W
 
-from .config import ENTRY_SCRIPT
+from .config import AppConfig, ENTRY_SCRIPT, parse_args, startup_arguments
 
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -20,17 +20,21 @@ RUN_NAME = "VRC LinguaBar"
 WATCH_MUTEX = "Local\\VRCLinguaBarWatcher"
 TH32CS_SNAPPROCESS = 0x00000002
 ERROR_ALREADY_EXISTS = 183
+WAIT_OBJECT_0 = 0
+WAIT_ABANDONED = 0x80
+WAIT_TIMEOUT = 258
 LOG = logging.getLogger("vrchat-ime.startup")
 
 
-def configure_logging(verbose: bool = False) -> None:
+def configure_logging(verbose: bool = False, *, watcher: bool = False) -> None:
     handlers = []
     if sys.stderr is not None:
         handlers.append(logging.StreamHandler())
     try:
         folder = os.path.join(os.environ["LOCALAPPDATA"], "VRC LinguaBar")
         os.makedirs(folder, exist_ok=True)
-        handlers.append(RotatingFileHandler(os.path.join(folder, "linguabar.log"),
+        filename = "watcher.log" if watcher else "linguabar.log"
+        handlers.append(RotatingFileHandler(os.path.join(folder, filename),
                                             maxBytes=1_000_000, backupCount=2,
                                             encoding="utf-8"))
     except (KeyError, OSError) as exc:
@@ -53,7 +57,8 @@ def python_without_console(executable: str) -> str:
     return candidate if os.path.isfile(candidate) else executable
 
 
-def run_command(mode: str, script: str, executable: str) -> str:
+def _command_arguments(mode: str, script: str, executable: str,
+                       settings: AppConfig | None = None) -> list[str]:
     python = python_without_console(executable)
     path = os.path.abspath(script)
     if mode == "login":
@@ -62,7 +67,31 @@ def run_command(mode: str, script: str, executable: str) -> str:
         args = [python, os.path.join(os.path.dirname(path), "startup.py"), "--watch-game"]
     else:
         raise ValueError(f"Invalid startup mode: {mode}")
-    return subprocess.list2cmdline(args)
+    return args + startup_arguments(settings)
+
+
+def run_command(mode: str, script: str, executable: str,
+                settings: AppConfig | None = None) -> str:
+    return subprocess.list2cmdline(_command_arguments(mode, script, executable, settings))
+
+
+def _split_command(command: str) -> list[str]:
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    split = shell32.CommandLineToArgvW
+    split.argtypes = [W.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    split.restype = ctypes.POINTER(W.LPWSTR)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    free = kernel32.LocalFree
+    free.argtypes = [W.HLOCAL]
+    free.restype = W.HLOCAL
+    count = ctypes.c_int()
+    arguments = split(command, ctypes.byref(count))
+    if not arguments:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return [arguments[index] for index in range(count.value)]
+    finally:
+        free(arguments)
 
 
 def read_run_command() -> str:
@@ -76,13 +105,22 @@ def read_run_command() -> str:
 
 def current_mode(script: str, executable: str) -> str:
     command = read_run_command()
+    if not command:
+        return "off"
+    actual = _split_command(command)
     for mode in ("game", "login"):
-        if command == run_command(mode, script, executable):
+        expected = _command_arguments(mode, script, executable)
+        if len(actual) < len(expected):
+            continue
+        paths_match = all(os.path.normcase(os.path.abspath(actual[index])) ==
+                          os.path.normcase(os.path.abspath(expected[index])) for index in (0, 1))
+        if paths_match and actual[2:len(expected)] == expected[2:]:
             return mode
     return "off"
 
 
-def configure(mode: str, script: str, executable: str) -> None:
+def configure(mode: str, script: str, executable: str,
+              settings: AppConfig | None = None) -> None:
     if mode not in ("off", "game", "login"):
         raise ValueError(f"Invalid startup mode: {mode}")
     previous = read_run_command()
@@ -94,14 +132,13 @@ def configure(mode: str, script: str, executable: str) -> None:
                 pass
         else:
             winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ,
-                              run_command(mode, script, executable))
+                              run_command(mode, script, executable, settings))
     if mode == "game":
         # The current app is already running. Start the watcher now so the
         # setting also works if the user closes this app before opening VRChat.
         try:
-            subprocess.Popen([python_without_console(executable),
-                              os.path.join(os.path.dirname(os.path.abspath(script)), "startup.py"),
-                              "--watch-game"], creationflags=subprocess.CREATE_NO_WINDOW,
+            subprocess.Popen(_command_arguments("game", script, executable, settings),
+                             creationflags=subprocess.CREATE_NO_WINDOW,
                              close_fds=True)
         except OSError:
             with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
@@ -147,7 +184,7 @@ def process_running(name: str) -> bool:
         close(handle)
 
 
-def watch_game(script: str, executable: str) -> None:
+def watch_game(script: str, executable: str, settings: AppConfig | None = None) -> None:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     create_mutex = kernel32.CreateMutexW
     create_mutex.argtypes = [W.LPVOID, W.BOOL, W.LPCWSTR]
@@ -155,13 +192,26 @@ def watch_game(script: str, executable: str) -> None:
     close = kernel32.CloseHandle
     close.argtypes = [W.HANDLE]
     close.restype = W.BOOL
-    mutex = create_mutex(None, False, WATCH_MUTEX)
+    release = kernel32.ReleaseMutex
+    release.argtypes = [W.HANDLE]
+    release.restype = W.BOOL
+    mutex = create_mutex(None, True, WATCH_MUTEX)
     if not mutex:
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
-        close(mutex)
-        return
-    expected = run_command("game", script, executable)
+        # A replaced watcher checks the new setting within three seconds.
+        # Allow it to release ownership before deciding this is a duplicate.
+        wait = kernel32.WaitForSingleObject
+        wait.argtypes = [W.HANDLE, W.DWORD]
+        wait.restype = W.DWORD
+        result = wait(mutex, 5000)
+        if result not in (WAIT_OBJECT_0, WAIT_ABANDONED):
+            error = ctypes.get_last_error()
+            close(mutex)
+            if result == WAIT_TIMEOUT:
+                return
+            raise ctypes.WinError(error)
+    expected = run_command("game", script, executable, settings)
     launched_for_this_game = False
     try:
         LOG.info("VRChat startup watcher ready")
@@ -175,7 +225,7 @@ def watch_game(script: str, executable: str) -> None:
             if running and not launched_for_this_game:
                 LOG.info("VRChat detected; starting VRC LinguaBar")
                 try:
-                    subprocess.Popen([python_without_console(executable), script],
+                    subprocess.Popen(_command_arguments("login", script, executable, settings),
                                      creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True)
                 except OSError as exc:
                     LOG.warning("Cannot launch input bar; will retry: %s", exc)
@@ -186,15 +236,23 @@ def watch_game(script: str, executable: str) -> None:
             time.sleep(3)
     finally:
         LOG.info("VRChat startup watcher stopped")
+        release(mutex)
         close(mutex)
 
 
 def main(argv=None) -> int:
-    if (sys.argv[1:] if argv is None else argv) != ["--watch-game"]:
+    arguments = sys.argv[1:] if argv is None else list(argv)
+    if not arguments or arguments[0] != "--watch-game":
         raise SystemExit("Usage: startup.py --watch-game")
-    configure_logging()
+    settings = parse_args(arguments[1:]) if len(arguments) > 1 else None
+    if settings is not None and settings.startup_mode is not None:
+        raise SystemExit("A watcher cannot change its own startup mode")
+    configure_logging(settings.verbose if settings is not None else False, watcher=True)
     try:
-        watch_game(str(ENTRY_SCRIPT), sys.executable)
+        if settings is None:
+            watch_game(str(ENTRY_SCRIPT), sys.executable)
+        else:
+            watch_game(str(ENTRY_SCRIPT), sys.executable, settings=settings)
         return 0
     except Exception:
         LOG.exception("VRChat startup watcher failed")

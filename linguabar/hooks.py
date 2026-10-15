@@ -70,6 +70,7 @@ class YHook:
         self.thread_id = 0
         self.handle = None
         self.error = ""
+        self.y_down = False  # Track forwarded presses as well as captured ones.
         self.swallow_y = False  # Only the hook thread writes this field.
         self.proc = HOOKPROC(self._callback)  # Keep alive until thread exits.
 
@@ -77,15 +78,19 @@ class YHook:
         try:
             if code >= 0 and message in (WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP):
                 key = ctypes.cast(data, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-                if not key.flags & LLKHF_INJECTED:
+                if not key.flags & LLKHF_INJECTED and key.vkCode == VK_Y:
                     is_up = message in (WM_KEYUP, WM_SYSKEYUP)
-                    if key.vkCode == VK_Y and self.swallow_y:
+                    was_down = self.y_down
+                    self.y_down = not is_up
+                    if self.swallow_y:
                         # Consume the entire wakeup press, including repeats/up,
                         # even when focus has moved to the new input window.
                         if is_up:
                             self.swallow_y = False
                         return 1
-                    if not is_up and not self.stopping.is_set() and key.vkCode == VK_Y:
+                    # A forwarded shortcut/native-text press must retain its
+                    # repeats and release even if modifiers or focus change.
+                    if not is_up and not was_down and not self.stopping.is_set():
                         hwnd = game_foreground()
                         pid = self.targets.get(hwnd)
                         if pid and window_ids(hwnd)[1] == pid and class_name(hwnd) == VRCHAT_CLASS:

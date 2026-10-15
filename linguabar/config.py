@@ -25,6 +25,21 @@ class AppConfig:
     verbose: bool = False
 
 
+def startup_arguments(settings: AppConfig | None = None) -> list[str]:
+    """Keep persistent runtime choices without saving one-shot commands or PIDs."""
+    if settings is None:
+        return []
+    defaults = AppConfig()
+    arguments = []
+    for name in ("osc_host", "osc_port", "osc_address", "idle_ms", "camera_listen_port"):
+        value = getattr(settings, name)
+        if value != getattr(defaults, name):
+            arguments.extend(("--" + name.replace("_", "-"), str(value)))
+    if settings.verbose:
+        arguments.append("--verbose")
+    return arguments
+
+
 def parse_args(argv=None) -> AppConfig:
     defaults = AppConfig()
     parser = argparse.ArgumentParser(
@@ -46,10 +61,17 @@ def parse_args(argv=None) -> AppConfig:
     args = parser.parse_args(argv)
     if not 1 <= args.osc_port <= 65535:
         parser.error("--osc-port must be between 1 and 65535")
-    if not 0 <= args.camera_listen_port <= 65535 or args.vrchat_pid < 0:
+    if not 0 <= args.camera_listen_port <= 65535 or not 0 <= args.vrchat_pid <= 0xFFFFFFFF:
         parser.error("Invalid camera port or VRChat PID")
+    if not args.osc_host or "\x00" in args.osc_host or any(char.isspace() for char in args.osc_host):
+        parser.error("--osc-host must contain a hostname or IP address without whitespace or NUL")
     if not args.osc_address.startswith("/") or "\x00" in args.osc_address:
         parser.error("--osc-address must start with / and contain no NUL")
+    try:
+        args.osc_address.encode("utf-8")
+        args.osc_host.encode("utf-8")
+    except UnicodeEncodeError:
+        parser.error("OSC host and address must contain valid Unicode text")
     if not 1 <= args.idle_ms <= 2147483647:
         parser.error("--idle-ms must be between 1 and 2147483647")
     return AppConfig(**vars(args))

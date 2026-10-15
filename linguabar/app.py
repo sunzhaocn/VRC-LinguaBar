@@ -94,7 +94,7 @@ class Controller(QObject):
 
     def set_startup_mode(self, mode):
         try:
-            startup.configure(mode, str(ENTRY_SCRIPT), sys.executable)
+            startup.configure(mode, str(ENTRY_SCRIPT), sys.executable, settings=self.args)
         except OSError as exc:
             LOG.error("Cannot update automatic startup: %s", exc)
         self.update_startup_actions()
@@ -126,12 +126,15 @@ class Controller(QObject):
             win32gui.EnumWindows(visit, None)
         except win32gui.error as exc:
             LOG.debug("Window enumeration failed: %s", exc)
+            return  # An incomplete scan cannot establish that the game exited.
         # CPython/GIL: publish a new snapshot, never mutate shared dictionaries.
         self.hook.targets = targets
         snapshot = tuple(sorted(targets.items()))
         if snapshot != self._target_snapshot:
             self._target_snapshot = snapshot
             self.guard.reset_session()  # Discard camera state for the previous game.
+        if self.bar is not None and targets.get(self.bar.target) != self.bar.target_pid:
+            self.bar.finish(False, "game-exit")
 
     @pyqtSlot(object)
     def on_foreground_changed(self, hwnd):
@@ -232,7 +235,7 @@ def run(args: AppConfig) -> int:
     startup.configure_logging(args.verbose)
     if args.startup_mode:
         try:
-            startup.configure(args.startup_mode, str(ENTRY_SCRIPT), sys.executable)
+            startup.configure(args.startup_mode, str(ENTRY_SCRIPT), sys.executable, settings=args)
             LOG.info("Automatic startup set to %s", args.startup_mode)
             return 0
         except OSError:

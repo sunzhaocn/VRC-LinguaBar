@@ -57,7 +57,8 @@ class ControllerLifecycleTests(unittest.TestCase):
             with patch.object(startup, "configure") as configure, \
                  patch.object(startup, "current_mode", return_value="game") as current_mode:
                 controller.set_startup_mode("game")
-            configure.assert_called_once_with("game", root_script, sys.executable)
+            configure.assert_called_once_with("game", root_script, sys.executable,
+                                              settings=controller.args)
             current_mode.assert_called_once_with(root_script, sys.executable)
         finally:
             controller.shutdown()
@@ -92,7 +93,8 @@ class StartupEntryTests(unittest.TestCase):
              patch.object(startup, "configure") as configure, \
              patch.object(app, "CreateMutex") as mutex:
             self.assertEqual(app.run(AppConfig(startup_mode="login")), 0)
-        configure.assert_called_once_with("login", str(root_script), sys.executable)
+        configure.assert_called_once_with("login", str(root_script), sys.executable,
+                                          settings=AppConfig(startup_mode="login"))
         mutex.assert_not_called()
 
     def test_watcher_entrypoint_launches_root_script_after_module_move(self):
