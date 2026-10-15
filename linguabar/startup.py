@@ -59,20 +59,33 @@ def python_without_console(executable: str) -> str:
 
 def _command_arguments(mode: str, script: str, executable: str,
                        settings: AppConfig | None = None) -> list[str]:
+    if mode not in ("login", "game"):
+        raise ValueError(f"Invalid startup mode: {mode}")
+    if getattr(sys, "frozen", False):
+        args = [os.path.abspath(executable)]
+        if mode == "game":
+            args.append("--watch-game")
+        return args + startup_arguments(settings)
     python = python_without_console(executable)
     path = os.path.abspath(script)
     if mode == "login":
         args = [python, path]
-    elif mode == "game":
-        args = [python, os.path.join(os.path.dirname(path), "startup.py"), "--watch-game"]
     else:
-        raise ValueError(f"Invalid startup mode: {mode}")
+        args = [python, os.path.join(os.path.dirname(path), "startup.py"), "--watch-game"]
     return args + startup_arguments(settings)
 
 
 def run_command(mode: str, script: str, executable: str,
                 settings: AppConfig | None = None) -> str:
     return subprocess.list2cmdline(_command_arguments(mode, script, executable, settings))
+
+
+def _subprocess_environment() -> dict[str, str] | None:
+    if not getattr(sys, "frozen", False):
+        return None
+    # Both the watcher and input bar may outlive the process that launched them.
+    # Ask PyInstaller to treat each as a fresh application instance.
+    return {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
 
 
 def _split_command(command: str) -> list[str]:
@@ -108,13 +121,15 @@ def current_mode(script: str, executable: str) -> str:
     if not command:
         return "off"
     actual = _split_command(command)
+    path_count = 1 if getattr(sys, "frozen", False) else 2
     for mode in ("game", "login"):
         expected = _command_arguments(mode, script, executable)
         if len(actual) < len(expected):
             continue
         paths_match = all(os.path.normcase(os.path.abspath(actual[index])) ==
-                          os.path.normcase(os.path.abspath(expected[index])) for index in (0, 1))
-        if paths_match and actual[2:len(expected)] == expected[2:]:
+                          os.path.normcase(os.path.abspath(expected[index]))
+                          for index in range(path_count))
+        if paths_match and actual[path_count:len(expected)] == expected[path_count:]:
             return mode
     return "off"
 
@@ -139,7 +154,7 @@ def configure(mode: str, script: str, executable: str,
         try:
             subprocess.Popen(_command_arguments("game", script, executable, settings),
                              creationflags=subprocess.CREATE_NO_WINDOW,
-                             close_fds=True)
+                             close_fds=True, env=_subprocess_environment())
         except OSError:
             with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
                                     winreg.KEY_SET_VALUE) as key:
@@ -226,7 +241,8 @@ def watch_game(script: str, executable: str, settings: AppConfig | None = None) 
                 LOG.info("VRChat detected; starting VRC LinguaBar")
                 try:
                     subprocess.Popen(_command_arguments("login", script, executable, settings),
-                                     creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True)
+                                     creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True,
+                                     env=_subprocess_environment())
                 except OSError as exc:
                     LOG.warning("Cannot launch input bar; will retry: %s", exc)
                 else:

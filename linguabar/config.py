@@ -4,13 +4,15 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 
 APP_NAME = "VRC 语伴"
 MAX_CHARS = 144
 IDLE_MS = 2500
 VRCHAT_CLASS = "UnityWndClass"
 APP_MUTEX = "Local\\VRCLinguaBarApp"
-ENTRY_SCRIPT = Path(__file__).resolve().parent.parent / "vrchat_linguabar.py"
+ENTRY_SCRIPT = (Path(sys.executable).resolve() if getattr(sys, "frozen", False) else
+                Path(__file__).resolve().parent.parent / "vrchat_linguabar.py")
 
 
 @dataclass(frozen=True)

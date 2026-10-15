@@ -19,26 +19,15 @@ VRC 语伴是一个 Windows 桌面小工具。它会在游戏前方打开输入�
 
 ## 开始使用
 
-准备 Windows 10 / 11、Python 3.10 以上版本，以及需要使用的 Windows 输入法。下面以 Python 3.12 x64 为例。
+需要 Windows 10 / 11 64 位、VRChat PC 客户端，以及你平时使用的 Windows 输入法。**免安装版已带齐运行环境，不需要安装 Python。**
 
-1. 下载项目，在项目目录打开终端，安装依赖：
+1. 到 [Releases 下载](https://github.com/sunzhaocn/VRC-LinguaBar/releases/latest) `VRC-Yuban-0.0.2-Windows-x64.zip`，解压到一个固定位置。
+2. 在 VRChat 的 Action Menu 中打开 **OSC → Enabled**，然后双击解压文件夹里的 **VRC语伴.exe**。
+3. 回到游戏，关闭菜单和相机，按 **Y** 开始输入，按 **Enter** 发送并收起。
 
-   ```powershell
-   py -3.12 -m venv .venv
-   .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-   ```
+请保留完整文件夹，`VRC语伴.exe` 和 `_internal` 必须放在一起。想放到桌面时，可以给 exe 创建快捷方式。程序启动后会留在系统托盘，同一用户会话只运行一份。
 
-2. 在 VRChat 的 Action Menu 中打开 **OSC → Enabled**。
-
-3. 启动输入条：
-
-   ```powershell
-   .\.venv\Scripts\python.exe -m linguabar
-   ```
-
-4. 回到游戏，关闭菜单和相机，按 **Y** 开始输入。
-
-也可以用 `.\.venv\Scripts\python.exe .\vrchat_linguabar.py` 启动。程序会留在系统托盘，同一用户会话只运行一份。
+更新前，使用“随 VRChat 启动”的用户先把自动启动设为“关闭”，等待约 3 秒，再从托盘退出程序。解压并启动新版后，可以重新开启自动启动。若换了存放位置，请重新设置。
 
 ## 日常操作
 
@@ -52,7 +41,7 @@ VRC 语伴是一个 Windows 桌面小工具。它会在游戏前方打开输入�
 | 点击其他位置或 Alt+Tab | 取消本次输入并关闭 |
 | 托盘菜单 → 退出 | 退出后台程序 |
 
-右键托盘图标，在 **自动启动** 中选择“关闭”“随 VRChat 启动”或“登录 Windows 时启动”。设置只作用于当前 Windows 用户。移动项目目录后，需要重新设置。
+右键托盘图标，在 **自动启动** 中选择“关闭”“随 VRChat 启动”或“登录 Windows 时启动”。设置只作用于当前 Windows 用户。移动程序文件夹后，需要重新设置。
 
 ## 使用范围
 
@@ -61,6 +50,27 @@ VRC 语伴是一个 Windows 桌面小工具。它会在游戏前方打开输入�
 - 菜单识别依赖外部窗口和鼠标状态，不能覆盖所有游戏界面；第三方输入法和不同显示模式也可能有兼容差异。
 - 单行输入，最多 144 个 UTF-16 单元；常见汉字通常占 1 个，部分 emoji 占 2 个。
 - OSC 使用 UDP，没有游戏端送达确认。
+
+## 从源码运行
+
+开发者可以使用 Python 3.10 以上版本运行源码，发布包使用 Python 3.12 x64 打包。下面以 Python 3.12 为例，在项目目录执行：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+.\.venv\Scripts\python.exe -m linguabar
+```
+
+也可以用 `.\.venv\Scripts\python.exe .\vrchat_linguabar.py` 启动。源码与免安装版使用相同的托盘设置和 OSC 参数。
+
+打包使用 Windows x64 和 Python 3.12。先提交源码改动，再执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.\.venv\Scripts\python.exe tools/build_release.py
+```
+
+生成的 ZIP 和 SHA-256 校验文件位于 `dist` 目录。
 
 ## 更多说明
 

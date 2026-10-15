@@ -1,0 +1,27 @@
+VRC 语伴
+
+在 VRChat 里按 Y，用熟悉的 Windows 输入法打字。
+
+开始使用
+1. 将整个 ZIP 解压到一个固定文件夹，不要在压缩包内直接运行。
+2. 双击 VRC语伴.exe。无需安装 Python，程序运行后留在系统托盘。
+3. 在 VRChat 的 Action Menu 中开启 OSC → Enabled，回到游戏画面按 Y。
+
+Enter 发送并收起；Esc 取消；切到其他窗口时自动收起。
+正在选词时，Enter 优先交给输入法。输入条会实时发送已确认的文字，
+其他玩家可能在按 Enter 前就看到内容，取消不能撤回别人已经读到的文字。
+
+右键托盘图标，可以选择随 VRChat 启动、登录 Windows 时启动或退出。
+保留 exe 旁边的 _internal 文件夹。可以给 exe 建快捷方式，不要只移动 exe。
+若要覆盖更新，先将“自动启动”设为“关闭”，等待约 3 秒后从托盘退出。
+解压新版，启动后再选择需要的自动启动方式。
+
+适用 Windows 10 / 11 的 64 位 PC；不是 VR 头显内的原生浮层。
+需要已安装的系统输入法。工具不提供翻译。
+默认聊天端口 9000，相机状态接收端口 9001。
+
+程序日志：%LOCALAPPDATA%\VRC LinguaBar\linguabar.log
+游戏监视器日志：同目录 watcher.log
+
+使用指南：https://github.com/sunzhaocn/VRC-LinguaBar/blob/main/docs/使用指南.md
+源码与许可：https://github.com/sunzhaocn/VRC-LinguaBar
