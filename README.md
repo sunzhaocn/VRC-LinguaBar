@@ -21,8 +21,8 @@ VRC 语伴是一个 Windows 桌面小工具。它会在游戏前方打开输入�
 
 需要 Windows 10 / 11 64 位、VRChat PC 客户端，以及你平时使用的 Windows 输入法。**免安装版已带齐运行环境，不需要安装 Python。**
 
-1. 到 [Releases 下载](https://github.com/sunzhaocn/VRC-LinguaBar/releases/latest) **VRC语伴.exe**，保存到一个固定位置。
-2. 在 VRChat 的 Action Menu 中打开 **OSC → Enabled**，然后双击 **VRC语伴.exe**。
+1. 到 [Releases 下载](https://github.com/sunzhaocn/VRC-LinguaBar/releases/latest) **VRC-Yuban.exe**，保存到一个固定位置。
+2. 在 VRChat 的 Action Menu 中打开 **OSC → Enabled**，然后双击 **下载的 EXE**。
 3. 回到游戏，关闭菜单和相机，按 **Y** 开始输入，按 **Enter** 发送并收起。
 
 下载一个 EXE 就能运行，所需环境已包含在程序中。可以直接放在桌面或其他固定位置，双击后会留在系统托盘，同一用户会话只运行一份。
